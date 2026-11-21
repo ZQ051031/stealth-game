@@ -1,79 +1,52 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
+// The screenshot scenes behind ?shot=NAME: each builds a real level, places the sneak, runs the
+// real rules forward a fixed number of steps (the guards walk their routes, the eyes sweep) and
+// hands back the screen to paint over it. The same name always gives the same frame.
+LB.stageShot = function (name) {
+  const STEP = LB.STEP;
+  const T = LB.TILE;
+  const scenes = {
+    cover: { level: 3, at: [11, 16], seconds: 9.5, aim: [15, 12], taken: [] },
+    garden: { level: 2, at: [5, 8], seconds: 6, aim: [9, 12], taken: [] },
+    caught: { level: 1, at: [17, 13], seconds: 4.2, caught: true },
+    escape: { level: 4, at: [19, 1], seconds: 12, escape: true },
+  };
+  const s = scenes[name] || scenes.cover;
+  const world = LB.createWorld(s.level);
+  const st = world.state;
+  const p = st.player;
+  p.x = s.at[0] * T + T / 2;
+  p.y = s.at[1] * T + T / 2;
+  p.sneak = true;
+  const events = [];
+  const idle = { x: 0, y: 0, sneak: true, aim: null, throwAt: null };
+  const frames = Math.round(s.seconds / STEP);
+  for (let i = 0; i < frames; i += 1) {
+    if (s.caught || s.escape) p.hidden = true;
+    const out = world.step(STEP, idle);
+    if (i > frames - 120) for (let k = 0; k < out.length; k += 1) events.push(out[k]);
   }
-  return Infinity;
-}
-
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
+  p.hidden = false;
+  if (s.aim) {
+    world.step(STEP, { x: 0, y: 0, sneak: true, aim: { x: s.aim[0] * T, y: s.aim[1] * T }, throwAt: null });
+    return { world: world, screen: 'play', events: events, aim: { x: s.aim[0] * T, y: s.aim[1] * T }, clock: s.seconds };
   }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
+  if (s.caught) {
+    p.moving = true;
+    for (let i = 0; i < 300 && st.status === 'play'; i += 1) world.step(STEP, { x: 0, y: 0, sneak: false, aim: null, throwAt: null });
+    for (let i = 0; i < 30; i += 1) world.step(STEP, idle);
+    return { world: world, screen: 'caught', events: [], clock: s.seconds };
   }
-  return best;
-}
-
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
-  }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
-}
+  st.relics.forEach(function (r) {
+    r.taken = true;
+  });
+  st.hasKey = true;
+  if (st.key) st.key.taken = true;
+  st.time = 151.4;
+  return {
+    world: world,
+    screen: 'escaped',
+    events: [],
+    clock: s.seconds,
+    result: { stars: [true, true, true], count: 3, time: 151.4, record: true, relics: st.relics.length, total: st.relics.length },
+  };
+};
